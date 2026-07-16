@@ -1,0 +1,273 @@
+diff --git a/build/config/apple/sdk_info.py b/build/config/apple/sdk_info.py
+index bbadc12473e..777cde08684 100755
+--- a/build/config/apple/sdk_info.py
++++ b/build/config/apple/sdk_info.py
+@@ -50,6 +50,10 @@ def FillXcodeVersion(settings, developer_dir):
+   if developer_dir:
+     xcode_version_plist_path = os.path.join(developer_dir,
+                                             'Contents/version.plist')
++    if not os.path.exists(xcode_version_plist_path):
++      # Support flattened hermetic toolchains that place version.plist directly
++      # in the provided root directory.
++      xcode_version_plist_path = os.path.join(developer_dir, 'version.plist')
+     with open(xcode_version_plist_path, 'rb') as f:
+       version_plist = plistlib.load(f)
+     settings['xcode_version'] = FormatVersion(
+diff --git a/build/config/ios/BUILD.gn b/build/config/ios/BUILD.gn
+index 507e2a86772..0c843795a5f 100644
+--- a/build/config/ios/BUILD.gn
++++ b/build/config/ios/BUILD.gn
+@@ -112,7 +112,9 @@ config("runtime_library") {
+   # Rebase the value in that case since gn does not convert paths in compiler
+   # flags (since it is not aware they are paths).
+   _sdk_root = ios_sdk_path
+-  if (ios_use_xcode_symlinks) {
++  if (ios_use_xcode_symlinks || host_os != "mac") {
++    # Cross builds pass a source-absolute ios_sdk_path; convert it to a path
++    # relative to the build directory for the compiler command line.
+     _sdk_root = rebase_path(ios_sdk_path, root_build_dir)
+   }
+ 
+diff --git a/build/config/ios/ios_sdk.gni b/build/config/ios/ios_sdk.gni
+index 9a0ea63dd79..4742e4fdf37 100644
+--- a/build/config/ios/ios_sdk.gni
++++ b/build/config/ios/ios_sdk.gni
+@@ -10,7 +10,6 @@ import("//build/toolchain/toolchain.gni")
+ import("//build_overrides/build.gni")
+ 
+ assert(current_os == "ios")
+-assert(use_system_xcode, "Hermetic xcode doesn't work for ios.")
+ 
+ declare_args() {
+   # SDK path to use. When empty this will use the default SDK based on the
+@@ -30,10 +29,19 @@ declare_args() {
+   # Set DEVELOPER_DIR while running sdk_info.py.
+   ios_sdk_developer_dir = ""
+ 
++  # Normally computed from the SDK by sdk_info.py. Declared as args so that
++  # cross builds providing ios_sdk_path externally can set them too.
++  ios_sdk_build = ""
++  ios_platform_build = ""
++
+   # Set to true if building an app extension.
+   ios_is_app_extension = false
+ }
+ 
++assert(use_system_xcode || ios_sdk_path != "",
++       "Hermetic xcode doesn't work for ios. Cross builds must provide " +
++           "the SDK via the ios_sdk_path GN arg.")
++
+ # Building XCTests requires copying XCTRunner.app which is part of the iOS
+ # SDK (and shipped inside Xcode.app) into the application. When using the
+ # system installation of Xcode, those files are outside of the checkout.
+diff --git a/build/config/ios/ios_test_runner_wrapper.gni b/build/config/ios/ios_test_runner_wrapper.gni
+index 6fac03ff476..e489bfc0c05 100644
+--- a/build/config/ios/ios_test_runner_wrapper.gni
++++ b/build/config/ios/ios_test_runner_wrapper.gni
+@@ -112,7 +112,10 @@ template("ios_test_runner_wrapper") {
+     # test runner relies on iossim for simulator builds.
+     if (target_environment == "simulator") {
+       _rebased_root_build_dir = rebase_path("${root_build_dir}", root_build_dir)
+-      data_deps += [ "//testing/iossim" ]
++      if (host_os == "mac") {
++        # iossim is a mac-only host tool; cross builds cannot build or run it.
++        data_deps += [ "//testing/iossim" ]
++      }
+ 
+       executable_args += [
+         "--iossim",
+diff --git a/build/config/ios/rules.gni b/build/config/ios/rules.gni
+index 2790d2c0fe3..64ccbd4a6c0 100644
+--- a/build/config/ios/rules.gni
++++ b/build/config/ios/rules.gni
+@@ -567,7 +567,9 @@ template("ios_app_bundle") {
+         if (!defined(data_deps)) {
+           data_deps = []
+         }
+-        if (build_with_chromium) {
++        if (build_with_chromium && host_os == "mac") {
++          # iossim is a mac-only host tool; cross builds cannot build or
++          # run it.
+           data_deps += [ "//testing/iossim" ]
+         }
+       }
+diff --git a/build/config/mac/mac_sdk.gni b/build/config/mac/mac_sdk.gni
+index 8d97e7534be..853fee0d2f8 100644
+--- a/build/config/mac/mac_sdk.gni
++++ b/build/config/mac/mac_sdk.gni
+@@ -59,6 +59,16 @@ declare_args() {
+   # builds with system Xcode to test new SDKs, set this.
+   # Don't set this on any bots.
+   mac_allow_system_xcode_for_official_builds_for_testing = false
++
++  # Override path to the hermetic Xcode bundle root (directory that contains
++  # Contents/version.plist). When empty, Chromium uses the default checkout
++  # location under //build/mac_files/xcode_binaries.
++  mac_hermetic_xcode_path = ""
++
++  # Set true when using a flattened hermetic toolchain layout that contains
++  # `version.plist`, `MacOSX.sdk`, and tool binaries directly in
++  # `mac_hermetic_xcode_path` (instead of Xcode.app-like Contents/Developer).
++  mac_hermetic_xcode_flat_layout = false
+ }
+ 
+ # Check that the version of macOS SDK used is the one requested when building
+@@ -80,7 +90,14 @@ if (is_chrome_branded && is_official_build && target_os != "ios") {
+ # The path to the hermetic install of Xcode. Only relevant when
+ # use_system_xcode = false.
+ if (!use_system_xcode) {
+-  _hermetic_xcode_path = "//build/mac_files/xcode_binaries"
++  _mac_hermetic_xcode_path_from_env = getenv("CHROMIUM_MAC_HERMETIC_XCODE_PATH")
++  if (mac_hermetic_xcode_path != "") {
++    _hermetic_xcode_path = mac_hermetic_xcode_path
++  } else if (_mac_hermetic_xcode_path_from_env != "") {
++    _hermetic_xcode_path = _mac_hermetic_xcode_path_from_env
++  } else {
++    _hermetic_xcode_path = "//build/mac_files/xcode_binaries"
++  }
+ }
+ 
+ script_name = "//build/config/apple/sdk_info.py"
+@@ -160,10 +177,15 @@ if (use_system_xcode) {
+ } else {
+   mac_sdk_version = mac_sdk_official_version
+   mac_sdk_build_version = mac_sdk_official_build_version
+-  _dev = _hermetic_xcode_path + "/Contents/Developer"
+-  _sdk = "MacOSX${mac_sdk_version}.sdk"
+-  mac_sdk_path = _dev + "/Platforms/MacOSX.platform/Developer/SDKs/$_sdk"
+-  mac_bin_path = _dev + "/Toolchains/XcodeDefault.xctoolchain/usr/bin/"
++  if (mac_hermetic_xcode_flat_layout) {
++    mac_sdk_path = _hermetic_xcode_path + "/MacOSX.sdk"
++    mac_bin_path = _hermetic_xcode_path + "/"
++  } else {
++    _dev = _hermetic_xcode_path + "/Contents/Developer"
++    _sdk = "MacOSX${mac_sdk_version}.sdk"
++    mac_sdk_path = _dev + "/Platforms/MacOSX.platform/Developer/SDKs/$_sdk"
++    mac_bin_path = _dev + "/Toolchains/XcodeDefault.xctoolchain/usr/bin/"
++  }
+ 
+   # If we're using hermetic Xcode, then we want the paths to be relative so that
+   # generated ninja files are independent of the directory location.
+diff --git a/build/toolchain/apple/compile_xcassets.py b/build/toolchain/apple/compile_xcassets.py
+index 3fe9bbbde61..980228d06ba 100644
+--- a/build/toolchain/apple/compile_xcassets.py
++++ b/build/toolchain/apple/compile_xcassets.py
+@@ -381,6 +381,20 @@ def Main():
+     else:
+       shutil.rmtree(args.output)
+ 
++  # Cross builds on non-mac hosts have no actool; emit stub outputs so the
++  # bundle can still be assembled (asset catalogs are not needed to run
++  # tests on the simulator).
++  if shutil.which('xcrun') is None:
++    with open(args.output, 'wb'):
++      pass
++    if args.partial_info_plist:
++      with open(args.partial_info_plist, 'wb') as f:
++        f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n'
++                b'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
++                b' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
++                b'<plist version="1.0">\n<dict/>\n</plist>\n')
++    return
++
+   with tempfile.TemporaryDirectory() as temporary_dir:
+     CompileAssetCatalog(args.output, args.target_os, args.target_environment,
+                         args.product_type, args.minimum_deployment_target,
+diff --git a/build_overrides/build.gni b/build_overrides/build.gni
+index a623d5d85fd..2e155a95da7 100644
+--- a/build_overrides/build.gni
++++ b/build_overrides/build.gni
+@@ -112,6 +112,8 @@ if (host_os == "mac" || is_apple) {
+     use_system_xcode = _result != 1
+   }
+ 
+-  assert(current_os != "ios" || use_system_xcode)
++  # Allow cross builds targeting iOS from a non-mac host when the SDK is
++  # provided externally via the ios_sdk_path GN arg.
++  assert(current_os != "ios" || use_system_xcode || host_os != "mac")
+   assert(host_os == "mac" || !use_system_xcode)
+ }
+diff --git a/cobalt/BUILD.gn b/cobalt/BUILD.gn
+index 44293a920c5..bb3d1bb77f2 100644
+--- a/cobalt/BUILD.gn
++++ b/cobalt/BUILD.gn
+@@ -92,7 +92,6 @@ if (is_ios && target_platform == "tvos") {
+     deps = [
+       ":common",
+       "//base",
+-      "//cobalt/browser/tvos/intents:yt_intents",
+       "//cobalt/shell:cobalt_shell_app",
+       "//cobalt/shell:cobalt_shell_lib",
+       "//content/public/app",
+@@ -103,7 +102,13 @@ if (is_ios && target_platform == "tvos") {
+       "shell/app/ios/resources",
+     ]
+ 
+-    intents_target = "//cobalt/browser/tvos/intents:yt_intents"
++    if (host_os == "mac") {
++      # The AppIntents Swift module needs an Apple-target swiftc and the
++      # appintentsmetadataprocessor tool, neither of which exists on
++      # non-mac hosts; cross builds omit the intents integration.
++      deps += [ "//cobalt/browser/tvos/intents:yt_intents" ]
++      intents_target = "//cobalt/browser/tvos/intents:yt_intents"
++    }
+ 
+     data_deps = [ "//tools/v8_context_snapshot:v8_context_snapshot" ]
+ 
+diff --git a/components/password_manager/core/browser/import/BUILD.gn b/components/password_manager/core/browser/import/BUILD.gn
+index c65168898e5..39238bea7d9 100644
+--- a/components/password_manager/core/browser/import/BUILD.gn
++++ b/components/password_manager/core/browser/import/BUILD.gn
+@@ -47,7 +47,7 @@ source_set("importer_unit_tests") {
+     "//testing/gtest",
+   ]
+ 
+-  if (is_ios) {
++  if (is_ios && host_os == "mac") {
+     deps += [ "//components/password_manager/services/csv_password/ios:fake_password_parser_service" ]
+   } else {
+     deps += [ "//components/password_manager/services/csv_password:fake_password_parser_service" ]
+diff --git a/components/password_manager/services/csv_password/BUILD.gn b/components/password_manager/services/csv_password/BUILD.gn
+index 70bf0d8dbd2..56318ad0c94 100644
+--- a/components/password_manager/services/csv_password/BUILD.gn
++++ b/components/password_manager/services/csv_password/BUILD.gn
+@@ -5,7 +5,7 @@
+ import("//build/config/features.gni")
+ 
+ source_set("lib") {
+-  if (!is_ios) {
++  if (!is_ios || host_os != "mac") {
+     sources = [
+       "csv_password_parser_impl.cc",
+       "csv_password_parser_impl.h",
+@@ -19,7 +19,7 @@ source_set("lib") {
+ 
+   public_deps =
+       [ "//components/password_manager/services/csv_password/public/mojom" ]
+-  if (is_ios) {
++  if (is_ios && host_os == "mac") {
+     public_deps +=
+         [ "//components/password_manager/services/csv_password/ios:lib" ]
+   }
+@@ -32,7 +32,7 @@ source_set("service") {
+     "//components/password_manager/services/csv_password/public/mojom",
+     "//mojo/public/cpp/bindings",
+   ]
+-  if (is_ios) {
++  if (is_ios && host_os == "mac") {
+     public_deps +=
+         [ "//components/password_manager/services/csv_password/ios:service" ]
+   } else {
+diff --git a/third_party/blink/renderer/build/scripts/scripts.gni b/third_party/blink/renderer/build/scripts/scripts.gni
+index 31916c877e6..988940db089 100644
+--- a/third_party/blink/renderer/build/scripts/scripts.gni
++++ b/third_party/blink/renderer/build/scripts/scripts.gni
+@@ -79,7 +79,7 @@ make_trie_helpers_files =
+ # on Posix we want to run the system one on the path.
+ if (host_os == "win") {
+   gperf_exe = rebase_path("//third_party/gperf/bin/gperf.exe", root_build_dir)
+-} else if (is_ios) {
++} else if (is_ios && host_os == "mac") {
+   gperf_exe = ios_bin_path + "gperf"
+ } else if (host_os == "mac") {
+   # TODO(thakis): This should probably run in the host toolchain and check
