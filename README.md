@@ -64,6 +64,10 @@ The toolchain zip contains: `AppleTVSimulator.sdk`, the platform `Library`
 
 ### 2) Set up and generate on Linux
 
+All of these env vars are optional — the script already defaults to the
+values shown below, so `./setup_linux.sh` alone works if your checkout
+matches. Set one only to override its default (e.g. a different `SRC_ROOT`):
+
 ```bash
 SRC_ROOT="$HOME/projects/chromium/src" \
 ARTIFACTS_DIR="$HOME/mac-toolchain" \
@@ -165,6 +169,11 @@ Same as the Chromium flow: run `make_artifacts_mac.sh` on a Mac, copy
 machine's `~/mac-toolchain/`.
 
 ### 2) Set up and generate
+
+All of these env vars are optional — the script already defaults to the
+values shown below, so `./setup_cobalt_linux.sh` alone works if your
+checkout matches. Set one only to override its default (e.g. a different
+`SRC_ROOT`):
 
 ```bash
 SRC_ROOT="$HOME/projects/cobalt/src" \
