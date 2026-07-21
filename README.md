@@ -20,7 +20,7 @@ Everything is driven by these scripts:
 | file | runs on | what it does |
 |---|---|---|
 | `make_artifacts_mac.sh` | Mac | creates the two artifact zips (shared by both variants) |
-| `setup_cobalt_linux.sh` | Linux | unpack, compiler-rt install, patches, args.gn, gn gen (Cobalt, reclient) |
+| `setup_cobalt_linux.sh` | Linux | unpacks artifacts, installs compiler-rt, and writes args.gn (Cobalt, siso) |
 | `tvos-cross-cobalt.patch` | — | source patches rebased for Cobalt's older Chromium base |
 | `setup_linux.sh` | Linux | unpack, compiler-rt install, patches, args.gn, gn gen (Chromium, siso) |
 | `tvos-cross.patch` | — | all source patches, applied by setup_linux.sh |
@@ -168,7 +168,7 @@ Same as the Chromium flow: run `make_artifacts_mac.sh` on a Mac, copy
 `chromium-tvos-toolchain.zip` and `chromium-mac-extra.zip` to the Linux
 machine's `~/mac-toolchain/`.
 
-### 2) Set up and generate
+### 2) Set up the toolchain and args.gn
 
 All of these env vars are optional — the script already defaults to the
 values shown below, so `./setup_cobalt_linux.sh` alone works if your
@@ -185,20 +185,36 @@ USE_REMOTEEXEC=true \
 ```
 
 This unpacks the toolchain, installs darwin compiler-rt into Cobalt's clang,
-applies `tvos-cross-cobalt.patch`, writes `args.gn` (imports
+and writes `args.gn` (imports
 `//cobalt/build/configs/tvos-arm64-simulator/args.gn` plus the external-SDK
-args and `use_system_xcode=false`), and runs `gn gen --check`. The script is
-idempotent — safe to rerun after `gclient sync` (see gotchas below). With a
-few thousand GN targets, the `gn gen` step alone can take ~2 minutes; that's
-normal, not a hang.
+args and `use_system_xcode=false`). It does not modify Cobalt source files or
+run `gn gen`.
 
-### 3) Build
+### 3) Apply the Cobalt source patch
+
+After setup completes, apply the source changes explicitly from the Cobalt
+`src` directory:
 
 ```bash
-autoninja -C out/tvos-sim cobalt
+cd "$COBALT_ROOT/src"
+git apply /path/to/tvos-cross-build-rbe/tvos-cross-cobalt.patch
+```
+
+The setup script intentionally does not apply or detect this patch. Cobalt's
+Chromium base changes over time, so inspect any application failure and rebase
+the patch accordingly.
+
+### 4) Generate and build
+
+```bash
+cd "$COBALT_ROOT/src"
+gn gen <BUILD_DIR> --check
+autoninja -C <BUILD_DIR> cobalt
 ```
 
 `//cobalt:cobalt` is the main tvOS app bundle target.
+With a few thousand GN targets, `gn gen` can take about two minutes; that is
+normal, not a hang.
 
 ### How tvos-cross-cobalt.patch differs from tvos-cross.patch
 
@@ -215,9 +231,11 @@ loses Siri/AppIntents integration.
 
 ### Cobalt-specific gotchas
 
-- **`gclient sync` wipes the darwin compiler-rt** (same failure mode as
-  Chromium's quick-failure-check 1 below) — rerun `setup_cobalt_linux.sh` any
-  time after a sync, before building.
+- **Run `gclient sync` before setup and manual patching.** A sync wipes the
+  darwin compiler-rt installed inside Cobalt's clang (the same failure mode as
+  Chromium's quick-failure-check 1 below) and may update files touched by
+  `tvos-cross-cobalt.patch`. After every sync, rerun `setup_cobalt_linux.sh`,
+  then verify or reapply/rebase the source patch before running `gn gen`.
 - **`cobalt/build/gn.py` requires `-p <platform>`** and its positional arg
   (the out dir) must be two levels deep, e.g. `out/tvos-sim`, not `tvos-sim`
   — only relevant if you regenerate args by hand instead of via the setup

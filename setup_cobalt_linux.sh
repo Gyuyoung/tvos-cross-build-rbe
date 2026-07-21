@@ -1,11 +1,9 @@
 #!/bin/bash
 # Sets up the Cobalt tvOS simulator cross build on Linux:
-# unpacks artifacts, installs darwin compiler-rt, applies source patches,
-# writes args.gn, and runs gn gen.
+# unpacks artifacts, installs darwin compiler-rt, and writes args.gn.
 #
 # Cobalt variant of setup_linux.sh (see RUNBOOK.md). Differences:
-#  - patch file is tvos-cross-cobalt.patch (rebased for Cobalt's older
-#    Chromium base; the user_data_importer hunk does not exist there).
+#  - source changes are maintained separately in tvos-cross-cobalt.patch.
 #  - args.gn imports Cobalt's platform config
 #    (cobalt/build/configs/tvos-arm64-simulator/args.gn) and mirrors what
 #    cobalt/build/gn.py writes (build_type, reclient cfg dir, use_siso=false),
@@ -48,18 +46,7 @@ mkdir -p "${CLANG_VER_DIR}lib/darwin"
 rsync -a "$TOOLCHAIN_REL/mac_extra/chromium-mac-extra/clang-rt-darwin/" "${CLANG_VER_DIR}lib/darwin/"
 echo "compiler-rt installed into ${CLANG_VER_DIR}lib/darwin"
 
-# 3) Apply source patches (idempotent) ----------------------------------------
-PATCH="$SCRIPT_DIR/tvos-cross-cobalt.patch"
-if git apply --check --reverse "$PATCH" 2>/dev/null; then
-  echo "patches already applied"
-elif git apply --check "$PATCH" 2>/dev/null; then
-  git apply "$PATCH"
-  echo "patches applied"
-else
-  echo "ERROR: $PATCH does not apply cleanly; rebase it against your tree"; exit 1
-fi
-
-# 4) Write args.gn from sdk_info.txt ------------------------------------------
+# 3) Write args.gn from sdk_info.txt ------------------------------------------
 INFO="$TOOLCHAIN_DIR/sdk_info.txt"
 val() { awk -F': ' -v k="$1" '$1==k{print $2}' "$INFO"; }
 XCODE_VERBATIM="$(val xcode_version_verbatim)"   # e.g. 26.6
@@ -123,8 +110,9 @@ mac_hermetic_xcode_path = "//$TOOLCHAIN_REL/chromium-tvos-toolchain"
 mac_hermetic_xcode_flat_layout = true
 EOF
 
-# 5) gn gen -------------------------------------------------------------------
-buildtools/linux64/gn gen "$BUILD_DIR" --check
 echo
-echo "Ready. Build with e.g.:"
-echo "  autoninja -C $BUILD_DIR base"
+echo "Setup complete. Next run:"
+echo "  cd \"$SRC_ROOT\""
+echo "  git apply \"$SCRIPT_DIR/tvos-cross-cobalt.patch\""
+echo "  gn gen \"$BUILD_DIR\" --check"
+echo "  autoninja -C \"$BUILD_DIR\" cobalt"
